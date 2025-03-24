@@ -1,7 +1,7 @@
 data:
   name: pl
-  path: /home/huangzl/datasets/targetdiff/crossdocked_v1.1_rmsd1.0
-  split: /home/huangzl/datasets/targetdiff/crossdocked_pocket10_pose_split.pt
+  path: /home/velvet/github/IPDiff/datasets/targetdiff/crossdocked_v1.1_rmsd1.0
+  split: /home/velvet/github/IPDiff/datasets/targetdiff/crossdocked_pocket10_pose_split.pt
   transform:
     ligand_atom_mode: add_aromatic
     random_rot: False
@@ -48,7 +48,7 @@ model:
 
 train:
   seed: 2021
-  batch_size: 4
+  batch_size: 1
   num_workers: 4
   n_acc_batch: 1
   max_iters: 1000000

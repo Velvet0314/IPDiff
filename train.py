@@ -5,10 +5,10 @@ import shutil
 import numpy as np
 import torch
 # import torch.utils.tensorboard
-from sklearn.metrics import roc_auc_score
-from torch.nn.utils import clip_grad_norm_
-from torch_geometric.loader import DataLoader
-from torch_geometric.transforms import Compose
+from sklearn.metrics import roc_auc_score  # 用于计算ROC AUC评分
+from torch.nn.utils import clip_grad_norm_  # 用于梯度裁剪防止梯度爆炸
+from torch_geometric.loader import DataLoader  # PyG专用数据加载器
+from torch_geometric.transforms import Compose  # 组合多个数据转换
 from tqdm.auto import tqdm
 
 import utils.misc as misc
@@ -21,6 +21,17 @@ from models.molopt_score_model import ScorePosNet3D
 from graphbap.bapnet import BAPNet
 
 def get_auroc(y_true, y_pred, feat_mode):
+    """
+    计算每个原子类型的AUROC分数并返回加权平均值
+    
+    参数:
+        y_true: 真实标签的numpy数组
+        y_pred: 预测标签的numpy数组
+        feat_mode: 特征模式，决定使用哪种原子类型映射
+        
+    返回:
+        加权平均的AUROC分数
+    """
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
     avg_auroc = 0.
@@ -36,9 +47,8 @@ def get_auroc(y_true, y_pred, feat_mode):
         print(f'atom: {mapping[feat_mode][c]} \t auc roc: {auroc:.4f}')
     return avg_auroc / len(y_true)
 
-
 if __name__ == '__main__':
-    root_dir = '/home/huangzl/workspace2/IPDiff-gspbapv5comp-n05'
+    root_dir = '/home/velvet/github/IPDiff/'
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=root_dir + '/configs/training.yml')
@@ -75,8 +85,8 @@ if __name__ == '__main__':
         trans.FeaturizeLigandBond(),
     ]
     if config.data.transform.random_rot:
-        transform_list.append(trans.RandomRotation())
-    transform = Compose(transform_list)
+        transform_list.append(trans.RandomRotation()) # 随机旋转增强数据
+    transform = Compose(transform_list) # 组合所有转换
 
     # Datasets and loaders
     logger.info('Loading dataset...')
@@ -87,7 +97,7 @@ if __name__ == '__main__':
     train_set, val_set = subsets['train'], subsets['test']
     logger.info(f'Training: {len(train_set)} Validation: {len(val_set)}')
 
-    collate_exclude_keys = ['ligand_nbh_list']
+    collate_exclude_keys = ['ligand_nbh_list'] # 排除不需要批处理的键
     train_iterator = utils_train.inf_iterator(DataLoader(
         train_set,
         batch_size=config.train.batch_size,
@@ -101,6 +111,7 @@ if __name__ == '__main__':
     # Model
     logger.info('Building model...')
 
+    # IPNet：通过先验知识引导扩散模型
     net_cond = BAPNet(ckpt_path=config.net_cond.ckpt_path, hidden_nf=config.net_cond.hidden_dim).to(args.device)
 
     model = ScorePosNet3D(
@@ -118,27 +129,37 @@ if __name__ == '__main__':
     scheduler = utils_train.get_scheduler(config.train.scheduler, optimizer)
 
     def train(it):
+        """
+        单次训练迭代
+        
+        参数:
+            it: 当前迭代次数
+        """
         model.train()
         optimizer.zero_grad()
         for _ in range(config.train.n_acc_batch):
             batch = next(train_iterator).to(args.device)
-
+            
+            # 为蛋白质位置添加噪声，模拟结构不确定性
             protein_noise = torch.randn_like(batch.protein_pos) * config.train.pos_noise_std
             gt_protein_pos = batch.protein_pos + protein_noise
 
+            # 训练核心部分 —— 在 targetdiff 基础上添加了 IPNet: net_cond
             results = model.get_diffusion_loss(
                 net_cond=net_cond,
                 protein_pos=gt_protein_pos,
                 protein_v=batch.protein_atom_feature.float(),
-                batch_protein=batch.protein_element_batch,
+                batch_protein=batch.protein_element_batch, # 蛋白质批次索引
 
                 ligand_pos=batch.ligand_pos,
                 ligand_v=batch.ligand_atom_feature_full,
-                batch_ligand=batch.ligand_element_batch
+                batch_ligand=batch.ligand_element_batch # 配体批次索引
             )
             loss, loss_pos, loss_v = results['loss'], results['loss_pos'], results['loss_v']
             loss = loss / config.train.n_acc_batch
             loss.backward()
+
+        # 梯度裁剪防止梯度爆炸
         orig_grad_norm = clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
         optimizer.step()
 
@@ -162,6 +183,8 @@ if __name__ == '__main__':
                 batch = batch.to(args.device)
                 batch_size = batch.num_graphs
                 t_loss, t_loss_pos, t_loss_v = [], [], []
+                
+                # 在每个时间步分别评估模型
                 for t in np.linspace(0, model.num_timesteps - 1, 10).astype(int):
                     time_step = torch.tensor([t] * batch_size).to(args.device)
                     results = model.get_diffusion_loss(

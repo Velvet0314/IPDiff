@@ -299,11 +299,11 @@ class ScorePosNet3D(nn.Module):
         self.shift_t_mlp_pos = nn.Sequential(nn.Linear(self.cond_dim + 1, 3))
 
     def forward(self, protein_pos, protein_v, batch_protein, init_ligand_pos, init_ligand_v, batch_ligand, time_step=None, return_all=False, fix_x=False, hbap_protein_prev=None, hbap_ligand_prev=None, hbap_protein=None, hbap_ligand=None):
-
+        
         batch_size = batch_protein.max().item() + 1
         init_ligand_v = F.one_hot(init_ligand_v, self.num_classes).float()
         if self.time_emb_dim > 0:
-            if self.time_emb_mode == 'simple':
+            if self.time_emb_mode == 'simple': # 默认是 simple
                 input_ligand_feat = torch.cat([
                     init_ligand_v,
                     (time_step / self.num_timesteps)[batch_ligand].unsqueeze(-1)
@@ -471,11 +471,12 @@ class ScorePosNet3D(nn.Module):
         protein_pos, ligand_pos, _ = center_pos(
             protein_pos, ligand_pos, batch_protein, batch_ligand, mode=self.center_pos_mode)
 
+        # 由 IPNet 先验知识辅助后的配体与蛋白质 
         hbap_ligand = None
         hbap_protein = None
         if self.model_mean_type == 'noise':
             pass
-        elif self.model_mean_type == 'C0':
+        elif self.model_mean_type == 'C0': # 默认是 C0
             gt_protein_v = protein_v
             gt_protein_pos = protein_pos
             gt_ligand_v = ligand_v
@@ -485,6 +486,8 @@ class ScorePosNet3D(nn.Module):
             gt_protein_a_h = torch.argmax(gt_protein_v[:, :6], dim=1)
             gt_protein_r_h = torch.argmax(gt_protein_v[:, 6:26], dim=1)
 
+            # line 5
+            # 从 IPNet 中提取特征 —— 得到了添加了先验知识的蛋白质和配体
             hbap_ligand, hbap_protein = net_cond.extract_features(gt_ligand_pos, gt_protein_pos, gt_lig_a_h, gt_protein_a_h, gt_protein_r_h, batch_ligand, batch_protein)
         else:
             raise ValueError
@@ -504,12 +507,22 @@ class ScorePosNet3D(nn.Module):
         pos_noise = torch.zeros_like(ligand_pos)
         pos_noise.normal_()
 
+        # line 6
+        # 先验知识生成偏移（shift），在原本的扩散公式上加上偏移，得到扰动后的配体位置
         shift_cond_t = torch.cat([hbap_ligand, time_step[batch_ligand].unsqueeze(-1)], -1)
+        # 注意 shift_t_mlp_pos 这个网络 —— ψ_θ_2
+        # shift_t_mlp_pos 是一个全连接网络，输入是 128 维的向量，输出是 3 维的向量
+        # BAPNet 提取的特征(hbap_ligand)是高维的语义特征(128维)
+        # 但分子构象需要的是 3D 空间中的几何指导
+        # 线性层将高维特征压缩映射到具体的 xyz 坐标偏移量
         shift_cond_t = self.shift_t_mlp_pos(shift_cond_t)
+        # 配体在 t 时刻经过 先验偏移 和 扰动 后的三维坐标位置
         ligand_pos_perturbed = a_pos.sqrt() * ligand_pos + (1.0 - a_pos).sqrt() * pos_noise + k_t_pos * shift_cond_t
+        # line 7
         log_ligand_v0 = index_to_log_onehot(ligand_v, self.num_classes)
         ligand_v_perturbed, log_ligand_vt = self.q_v_sample(log_ligand_v0, time_step, batch_ligand)
-
+        
+        # 调用 forward 进行前向传播
         preds = self(
             protein_pos=protein_pos,
             protein_v=protein_v,
