@@ -301,7 +301,11 @@ class ScorePosNet3D(nn.Module):
     def forward(self, protein_pos, protein_v, batch_protein, init_ligand_pos, init_ligand_v, batch_ligand, time_step=None, return_all=False, fix_x=False, hbap_protein_prev=None, hbap_ligand_prev=None, hbap_protein=None, hbap_ligand=None):
         
         batch_size = batch_protein.max().item() + 1
+        # init_ligand_v 是 line 523 的 ligand_v_perturbed
         init_ligand_v = F.one_hot(init_ligand_v, self.num_classes).float()
+
+        # line 8
+        # 配体嵌入
         if self.time_emb_dim > 0:
             if self.time_emb_mode == 'simple': # 默认是 simple
                 input_ligand_feat = torch.cat([
@@ -316,15 +320,24 @@ class ScorePosNet3D(nn.Module):
         else:
             input_ligand_feat = init_ligand_v
 
+        # line 8
+        # 蛋白质嵌入
         h_protein = self.protein_atom_emb(protein_v)
         init_ligand_h = self.ligand_atom_emb(input_ligand_feat)
+
+        # line 9
         if hbap_protein is None:
             hbap_protein = torch.zeros([h_protein.shape[0], self.cond_dim]).to(h_protein.device)
         if hbap_ligand is None:
             hbap_ligand = torch.zeros([init_ligand_h.shape[0], self.cond_dim]).to(init_ligand_h.device)
 
+        # 将扩散模型原本的特征与 IPNet 提取的特征进行结合
         h_protein = self.emb_mlp(torch.cat([h_protein, hbap_protein], dim=1))
         init_ligand_h = self.emb_mlp(torch.cat([init_ligand_h, hbap_ligand], dim=1))
+
+        # 这段代码给蛋白质和配体特征向量添加了节点类型指示器（node indicator）
+        # 目的是明确区分蛋白质原子和配体原子
+        # 节点类型识别：通过添加一个额外的特征维度（蛋白质为0，配体为1），模型可以明确区分两种不同类型的原子
 
         if self.config.node_indicator:
             h_protein = torch.cat([h_protein, torch.zeros(len(h_protein), 1).to(h_protein)], -1)
@@ -339,6 +352,7 @@ class ScorePosNet3D(nn.Module):
             batch_ligand=batch_ligand,
         )
 
+        # line 10
         outputs = self.refine_net(h_all, pos_all, mask_ligand, batch_all, return_all=return_all, fix_x=fix_x)
         final_pos, final_h = outputs['x'], outputs['h']
         final_ligand_pos, final_ligand_h = final_pos[mask_ligand], final_h[mask_ligand]
@@ -546,6 +560,8 @@ class ScorePosNet3D(nn.Module):
             target, pred = pos_noise, pred_pos_noise
         else:
             raise ValueError
+        
+        # line 11
         loss_pos = scatter_mean(((pred - target) ** 2).sum(-1), batch_ligand, dim=0)
         loss_pos = torch.mean(loss_pos)
 
