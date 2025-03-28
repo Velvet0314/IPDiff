@@ -28,7 +28,11 @@ def unbatch_v_traj(ligand_v_traj, n_data, ligand_cum_atoms):
     all_step_v = [np.stack(step_v) for step_v in all_step_v]  # num_samples * [num_steps, num_atoms_i]
     return all_step_v
 
-
+# 注意 shift_t_mlp_pos 这个网络 —— ψ_θ_2
+# shift_t_mlp_pos 是一个全连接网络，输入是 128 维的向量，输出是 3 维的向量
+# BAPNet 提取的特征(hbap_ligand)是高维的语义特征(128维)
+# 但分子构象需要的是 3D 空间中的几何指导
+# 线性层将高维特征压缩映射到具体的 xyz 坐标偏移量
 def sample_diffusion_ligand(model, data, num_samples, batch_size=16, device='cuda:0',
                             num_steps=None, pos_only=False, center_pos_mode='protein',
                             sample_num_atoms='prior', net_cond=None, cond_dim=128):
@@ -45,6 +49,8 @@ def sample_diffusion_ligand(model, data, num_samples, batch_size=16, device='cud
 
         t1 = time.time()
         with torch.no_grad():
+            # line 1 
+            # 配体的原子数量确定
             batch_protein = batch.protein_element_batch
             if sample_num_atoms == 'prior':
                 pocket_size = atom_num.get_space_size(batch.protein_pos.detach().cpu().numpy())
@@ -59,6 +65,7 @@ def sample_diffusion_ligand(model, data, num_samples, batch_size=16, device='cud
             else:
                 raise ValueError
 
+            # line 2 CoM & line 3
             # init ligand pos
             center_pos = scatter_mean(batch.protein_pos, batch_protein, dim=0)
             batch_center_pos = center_pos[batch_ligand]
@@ -71,6 +78,7 @@ def sample_diffusion_ligand(model, data, num_samples, batch_size=16, device='cud
                 uniform_logits = torch.zeros(len(batch_ligand), model.num_classes).to(device)
                 init_ligand_v = log_sample_categorical(uniform_logits)
 
+            # 进入采样算法的核心部分
             r = model.sample_diffusion(
                 protein_pos=batch.protein_pos,
                 protein_v=batch.protein_atom_feature.float(),
@@ -179,6 +187,7 @@ if __name__ == '__main__':
     for data_id in range(args.start_index, args.end_index + 1):
 
         data = test_set[data_id]
+        # 采样核心部分 —— 在 targetdiff 基础上添加了 IPNet: net_cond
         pred_pos, pred_v, pred_pos_traj, pred_v_traj, pred_v0_traj, pred_vt_traj, time_list = sample_diffusion_ligand(
             model, data, config.sample.num_samples,
             batch_size=args.batch_size, device=args.device,

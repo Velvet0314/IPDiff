@@ -598,21 +598,31 @@ class ScorePosNet3D(nn.Module):
 
         pos_traj, v_traj = [], []
         v0_pred_traj, vt_pred_traj = [], []
+        # 初始的配体的位置和类型信息是随机的 —— “全噪声”状态的配体
         ligand_pos, ligand_v = init_ligand_pos, init_ligand_v
 
+        # line 4 
+        # 初始化全为 0，因为在最开始我们对生成的配体没有任何确定信息
         hbap_protein = torch.zeros([batch_protein.shape[0], cond_dim], dtype=torch.float).to(ligand_v.device)
         hbap_ligand = torch.zeros([batch_ligand.shape[0], cond_dim], dtype=torch.float).to(protein_v.device)
+        # 将时间步进行反转 —— 由全噪声状态开始反向去噪
         time_seq = list(reversed(range(self.num_timesteps - num_steps, self.num_timesteps)))
+        # 偏移量初始化为 0
         shift_cond_t = None
         tT = torch.full(size=(num_graphs,), fill_value=len(time_seq), dtype=torch.long, device=protein_pos.device)
         shift_cond_t_minus1 = self.shift_t_mlp_pos(torch.cat([hbap_ligand, tT[batch_ligand].unsqueeze(-1)], -1))
 
+        # line 5 
+        # 进入反向去噪的循环 —— T to 1
         for i in tqdm(time_seq, desc='sampling', total=len(time_seq)):
             t = torch.full(size=(num_graphs,), fill_value=i, dtype=torch.long, device=protein_pos.device)
             if i >= 1:
                 t_minus1 = torch.full(size=(num_graphs,), fill_value=i - 1, dtype=torch.long, device=protein_pos.device)
             else:
                 t_minus1 = None
+            # 从 t = T 开始，调用前向传播进行去噪，预测 t-1 时刻的配体3D坐标位置和类型信息
+            # 因为预测，所以要调用 forward
+            # line 8
             preds = self(
                 protein_pos=protein_pos,
                 protein_v=protein_v,
@@ -635,7 +645,7 @@ class ScorePosNet3D(nn.Module):
                 v0_from_e = preds['pred_ligand_v']
             else:
                 raise ValueError
-
+            # line 9
             pos_model_mean = self.q_pos_posterior(x0=pos0_from_e, xt=ligand_pos, t=t, t_minus1=t_minus1, batch=batch_ligand, shift=shift_cond_t, shift_minus1=shift_cond_t_minus1)
             pos_log_variance = extract(self.posterior_logvar, t, batch_ligand)
             nonzero_mask = (1 - (t == 0).float())[batch_ligand].unsqueeze(-1)
@@ -649,14 +659,14 @@ class ScorePosNet3D(nn.Module):
             gt_protein_r_h = torch.argmax(gt_protein_v[:, 6:26], dim=1)
             pred_ligand_pos = pos0_from_e.detach()
             pred_lig_a_h = torch.argmax(v0_from_e.detach(), dim=1)
-
+            # line 11
             hbap_ligand, hbap_protein = net_cond.extract_features(pred_ligand_pos, gt_protein_pos, pred_lig_a_h, gt_protein_a_h, gt_protein_r_h, batch_ligand, batch_protein)
             hbap_ligand, hbap_protein = hbap_ligand.detach(), hbap_protein.detach()
 
             shift_cond_t = shift_cond_t_minus1
             if t_minus1 is not None:
                 shift_cond_t_minus1 = self.shift_t_mlp_pos(torch.cat([hbap_ligand, t_minus1[batch_ligand].unsqueeze(-1)], -1))
-
+            # line 10
             if not pos_only:
                 log_ligand_v_recon = F.log_softmax(v0_from_e, dim=-1)
                 log_ligand_v = index_to_log_onehot(ligand_v, self.num_classes)
